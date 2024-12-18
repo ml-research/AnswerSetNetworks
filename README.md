@@ -46,6 +46,21 @@ python -m pip install ./GroundSLASH
 ```
 This will also install PyTorch and other requirements if not installed yet. 
 
+### API keys and working dir
+To set the working dir for all experiments you need to create a `.env` file:
+```
+#Environment file to specify workspace dir and API Keys
+WORKSPACE_DIR="{smth like /workspaces/ASN_dev/AnswerSetNetworks}"
+
+#Huggingface caches if you dont want to use the default cache
+HF_HOME={your hf path here}
+HUGGINGFACE_HUB_CACHE={your hf path here}
+
+#weights and biases
+WANDB_PROJECT=answer-set-networks
+WANDB_API_KEY={insert your key here}
+```
+
 ### LLMs in ASN
 if you want to use ASN to train LLMs you have to install additional packages (Huggingface transformers, wandb, ...). In your project root run:
 ```
