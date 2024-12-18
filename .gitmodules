@@ -1,0 +1,4 @@
+[submodule "GroundSLASH"]
+	path = GroundSLASH
+	url = git@github.com:pdeibert/GroundSLASH.git
+	ignore = untracked

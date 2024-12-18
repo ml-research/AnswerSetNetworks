@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "answer_set_networks"
+version = "1.0.0"
+description = "Graph-based SLASH solver"
+readme = { file = "README.md", content-type = "text/markdown" }
+keywords = ["neuro-symbolic AI", "logic programming", "answer set programming"]
+dependencies = [
+    "torch",
+    "torch_geometric",
+    "torch_scatter",
+    "matplotlib",
+    "pygraphviz",
+    "Pillow",
+    "python-dotenv"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+
+[project.optional-dependencies]
+transformer_libs = [
+    "datasets",
+    "transformers",
+    "huggingface_hub",
+    "accelerate",
+    "peft",
+    "wandb"
+]
