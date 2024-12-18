@@ -1,13 +1,13 @@
 # Answer Set Networks:  Casting Answer Set Programming into Deep Learning
 Arseny Skryagin, Daniel Ochs, Philipp Deibert, Simon Kohaut, Devendra Singh Dhami , Kristian Kersting
 
-<div style="text-align:center">
+<p align="center">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://github.com/ml-research/AnswerSetNetworks/blob/main/imgs/logo_dark.png?raw=true">
   <source media="(prefers-color-scheme: light)" srcset="https://github.com/ml-research/AnswerSetNetworks/blob/main/imgs/logo_light.png?raw=true">
   <img alt="Shows a black logo in light color mode and a white one in dark color mode." src="https://user-images.githubusercontent.com/25423296/163456779-a8556205-d0a5-45e2-ac17-42d089e3c3f8.png">
 </picture>
-</div>
+</p>
 
 # Abstract
 Although Answer Set Programming (ASP) allows constraining neural-symbolic (NeSy) systems, its employment is hindered by the prohibitive costs of computing stable models and the CPU-bound nature of state-of-the-art solvers.
