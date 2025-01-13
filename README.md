@@ -19,6 +19,7 @@ Simultaneously, we make the following two contributions based on the strengths o
 Namely, we are the first to show the finetuning of Large Language Models (LLM) with DPPLs, employing ASNs to guide the training with logic.
 Further, we show the "constitutional navigation" of drones, i.e., encoding public aviation laws in an ASN for routing Unmanned Aerial Vehicles in uncertain environments.
 
+[![arXiv](https://img.shields.io/badge/arXiv-2412.14814-b31b1b)](https://arxiv.org/abs/2412.14814)
 
 
 
