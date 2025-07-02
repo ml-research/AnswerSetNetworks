@@ -204,6 +204,9 @@ class ASN:
                 *[torch.arange(len(powerset)) for powerset in powerset_dict.values()]
             )[combination_bounds[0] : combination_bounds[1]]
         ):
+            if powerset_choices.ndim == 0:
+                powerset_choices = powerset_choices.unsqueeze(0)
+
             # set choices
             for (rule, edges), powerset_choice in zip(
                 chain(rg.npp_edges.items(), rg.choice_edges.items()),
@@ -224,7 +227,7 @@ class ASN:
         batch = condense_edges_pyg(batch, device=device)
 
         # broadcast ids for certain atoms across each graph
-        certain_atom_ids = torch.tensor(rg.certain_atom_ids, device=device)
+        certain_atom_ids = torch.tensor(rg.certain_atom_ids, device=device, dtype=torch.long)
         query_sinks_batch = query_sinks
 
         graph_block = GraphBlock(
