@@ -21,6 +21,7 @@ class SolvingContext:
         batch_size: int = 1,
         npp_ctx_dict: Optional[Dict["NPPRule", torch.Tensor]] = None,
         sm_ctx: Optional[StableModelContext] = None,
+        minimize: bool = True,
         rank: int = 0,
         world_size: int = 1,
         group: Optional["ProcessGroup"] = None,
@@ -44,6 +45,9 @@ class SolvingContext:
         # stable model context
         self.sm_ctx = sm_ctx
 
+        # whether or not to compute minimal models
+        self.minimize = minimize
+
         # flag indicating whether or not the solving context is synchronized across processes
         self.synchronized = False
 
@@ -64,36 +68,41 @@ class SolvingContext:
 
         # filter for stable models
         for k in range(is_SM.shape[1]):
-            # an interpretation is SM for a given query iff it is a model for the given query
-            # AND it is not a superset of any other (subsequent) model for the given query
-            # mult. assignment so that we only consider interpretations that are models themselves
-            is_SM[:, k, :] *= (
-                # test if interpretation is NOT a superset of any subsequent model
-                ~torch.any(
-                    # check if element-wise OR is identical to itself (i.e., is superset)
-                    # I_k LOR I_j = I_k => I_k SUPSETEQ I_j
-                    torch.all(
-                        torch.eq(
-                            # element-wise OR with all subsequent interpretations
-                            # I_k LOR I_j for j > k
-                            torch.logical_or(atoms[[k], :], atoms[k + 1 :, :]),
-                            # -> n_combinations-(k+1) x n_atoms
-                            atoms[[k], :],
-                        ),
-                        # -> n_combinations-(k+1) x n_atoms
-                        dim=1,
-                        keepdims=True,
-                    ).T
-                    # -> 1 x n_combinations-(k+1)
-                    # multiply (LAND) to only consider other models
-                    # NOTE: 'is_SM' is initialized to 'is_model'
-                    * is_SM[:, k + 1 :, :].squeeze(-1),
-                    # -> n_unique_queries x n_combinations-(k+1)
-                    dim=1,
-                    keepdims=True,
-                )
-                # -> n_unique_queries x 1
-            )
+            # check if I_k is superset of I_j, j > k
+            is_supseteq = torch.all(
+                torch.eq(
+                    # element-wise OR with all subsequent interpretations
+                    # I_k LOR I_j for j > k
+                    torch.logical_or(atoms[[k], :], atoms[k+1:, :]),
+                    # -> n_combinations-(k+1) x n_atoms
+                    atoms[[k], :]
+                ),
+                # -> n_combinations-(k+1) x n_atoms
+                dim=1,
+                keepdims=True,
+            ).unsqueeze(0)
+            # -> 1 x n_combinations-(k+1) x 1
+
+            # update I_k to reflect whether it is a superset of another stable model candidate
+            is_SM[:, [k], :] *= ~torch.any(is_supseteq * is_SM[:, k + 1 :, :], dim=1, keepdims=True)
+
+            # check if I_k is subset of I_j, j > k
+            is_subseteq = torch.all(
+                torch.eq(
+                    # element-wise OR with all subsequent interpretations
+                    # I_k LAND I_j for j > k
+                    torch.logical_and(atoms[[k], :], atoms[k+1:, :]),
+                    # -> n_combinations-(k+1) x n_atoms
+                    atoms[[k], :]
+                ),
+                # -> n_combinations-(k+1) x n_atoms
+                dim=1,
+                keepdims=True,
+            ).unsqueeze(0)
+            # -> 1 x n_combinations-(k+1) x 1
+    
+            # update I_j to reflect whether it is a subset of another stable model candidate
+            is_SM[:, k+1:, :] *= ~(is_subseteq * is_SM[:, [k], :])
 
     def update_SMs(self, graph_block: "GraphBlock") -> None:
         atoms = graph_block.atoms
@@ -119,8 +128,9 @@ class SolvingContext:
             is_SM = torch.cat((is_SM, self.sm_ctx.is_SM), dim=1)
             npp_choices = torch.cat((npp_choices, self.sm_ctx.npp_choices), dim=0)
 
-        # filter for stable models
-        self.filter_SMs(atoms, is_SM)
+        if self.minimize:
+            # filter for minimality
+            self.filter_SMs(atoms, is_SM)
 
         # mask indicating whether interpretation is a stable model for ANY query
         is_SM_for_some = is_SM.any(dim=0).squeeze(-1)
@@ -137,7 +147,7 @@ class SolvingContext:
         self.synchronized = False
 
     def synchronize_SMs(self) -> None:
-        if self.world_size > 1:
+        if self.world_size > 1 and self.minimize:
             atoms = self.sm_ctx.atoms
             # -> m x n_atoms
             # (where m is the number of combinations where the interpretation is considered a SM for some query)

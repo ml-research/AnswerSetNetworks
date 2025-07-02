@@ -268,6 +268,7 @@ class ASN:
         queries: Optional[List[Constraint]] = None,
         npp_data: Optional[Dict[str, Tuple[Any]]] = None,
         device: Optional[torch.device] = None,
+        minimize: bool = True,
         num_phases: int = 1,
     ) -> Union[Dict[Constraint, List[Set[PredLiteral]]], List[Set[PredLiteral]]]:
         if device is None:
@@ -280,6 +281,7 @@ class ASN:
         solving_ctx = SolvingContext(
             len(queries) if queries else 1,
             npp_ctx_dict,
+            minimize=minimize,
         )
 
         for phase in range(num_phases):
