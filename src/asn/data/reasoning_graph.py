@@ -1,7 +1,6 @@
 import io
 import itertools
 from collections import defaultdict
-from copy import deepcopy
 from math import isfinite
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
@@ -23,7 +22,6 @@ from ground_slash.program import (
     Infimum,
     Literal,
     LiteralCollection,
-    Naf,
     Neg,
     NormalRule,
     NPPRule,
@@ -41,7 +39,7 @@ from torch_geometric.data import HeteroData
 from asn.utils import relop_dict
 from asn.utils.collections import get_minimal_collections
 
-from .expression import ComplexQuery, Conjunction, Disjunction
+from .expression import Conjunction, Disjunction, MultiConstraint
 
 
 class ReasoningGraph:
@@ -71,13 +69,13 @@ class ReasoningGraph:
 
         # map for some specific unicode symbols
         self.__unicode_symbols = {
-            "true": "\u22a5",
-            "false": "\u22a4",
-            "disj": "\u2228",
-            "conj": "\u2227",
-            "neq": "\u2260",
-            "leq": "\u2264",
-            "geq": "\u2265",
+            "true": "\u22a4",  # ⊤
+            "false": "\u22a5",  # ⊥
+            "disj": "\u2228",  # ∨
+            "conj": "\u2227",  # ∧
+            "neq": "\u2260",  # ≠
+            "leq": "\u2264",  # ≤
+            "geq": "\u2265",  # ≥
         }
 
         # node & edge dictionaries
@@ -143,401 +141,336 @@ class ReasoningGraph:
         if not statement.ground:
             raise ValueError(f"Statement {str(statement)} is not ground.")
 
-        # --------------- process body ---------------
-
-        if any(
-            isinstance(literal, BuiltinLiteral) and not literal.eval()
-            for literal in statement.body
-        ):
-            # false built-in literal (i.e., body never satisfied)
-            # no need to process rule
-            return
+        # Encode a statement of form:
+        #
+        #        H :- B.
+        #
+        # #################### process body ####################
+        #
+        #        B = b1, ..., bN, not bN+1, ..., not bM
+        #
+        # Connect all body literals to a conjunction representing
+        # the body 'B' with positive/negative edges
+        #
+        #       ┌──┐┌───┐┌──┐┌────┐┌───┐┌──┐
+        #       │b1││...││bN││bN+1││...││bM│
+        #       └┬─┘└─┬─┘└┬─┘└─┬──┘└─┬─┘└┬─┘
+        #        +    +   +    -     -   -
+        #        │    │   │    │     │   │
+        #       ┌▽────▽───▽────▽─────▽───▽┐
+        #       │           B (∧)         │
+        #       └─────────────────────────┘
+        #
+        # In case of facts (M=0), we treat it as
+        #       B = Truth
+        #
+        # NOTE: if the body consists of a single literal 'b',
+        # then we can skip encoding the conjunction and just
+        # use 'b' directly as representative for 'B'
 
         body_literals = []
-        body_literal_signs = []
 
-        # pre-process body literals
         for literal in statement.body:
-            # encode literal (if not exists)
-            sign = self.encode_literal(literal, certain_atoms)
-
-            # predicate or aggregate literal
-            if sign != 0:
+            if isinstance(literal, BuiltinLiteral):
+                if not literal.eval():
+                    # false built-in literal (i.e., body never satisfied)
+                    # no need to process rule
+                    return
+            else:
+                # encode literal (if not already) and keep track of it
+                self.encode_literal(literal, certain_atoms)
                 body_literals.append(literal)
-                body_literal_signs.append(sign)
-            # removes built-in literals from body
-            # we already know that these evaluate to 'True'
 
-        # fact
+        # in case of facts, treat 'truth' as only body literal
         if not body_literals:
             body_literals.append(self.true_const)
-            body_literal_signs.append(1)
 
-        # TODO: better way?
-        body_literals = Conjunction(*body_literals)
-
-        # single body literal
-        if len(body_literals) == 1:
-            # use literal directly
-            body_key = abs(body_literals[0])
-            body_sign = body_literal_signs[0]
-        # conjunction of body literals
+        # create conjunction of body literals
+        if len(body_literals) > 1:
+            body_signature = Conjunction(*body_literals)
+            self.encode_conjunction(*body_literals)
+        # use single body literal directly
         else:
-            body_key = body_literals
+            body_signature = body_literals[0]
 
-            # connect body literals to a conjunction node (if not exists)
-            if body_key not in self.node_id_dict:
-                self.add_node(
-                    body_key,
-                    "conj",
-                    f"{self.__unicode_symbols['conj']}_{{{len(self.node_dict['conj']['x'])-1}}}",
-                )
+        # #################### process head ####################
+        #
+        # Different cases:
+        #   Constraint:         H empty (K=0, treat as H = Falsity)
+        #   Normal rule:        H = a
+        #   Disjunctive rule:   H = a1 | ... | aK
+        #   Choice rule:        H = g1 © {a1:li1,...,lj1 ; ... ; aK:liK,...,ljK} ® g2
+        #   NPP rule:           H = #NPP{a, [o1,...,oK]}
+        #
+        # The 'a's in the head are the consequents;
+        # these are the atoms that can follow from the rule
+        #
+        #       ┌──┐     ┌──┐
+        #       │c1│ ... │cK│
+        #       └┬─┘     └┬─┘
+        #        ?        ?
+        #        │        │
+        #       ┌▽─┐     ┌▽─┐
+        #       │a1│ ... │aK│
+        #       └──┘     └──┘
+        #
+        # Here 'ci' represents that the conditions for 'ai' is fullfilled
+        #
+        # In the case of constraints & normal/disjunctive/NPP rules:
+        #   Conditions are simply the rule body, i.e.:
+        #
+        #       ci=B for all i=1,...,K
+        #
+        # In the case of choice rules, some consequents may have (possibly multiple)
+        # extra conditions
 
-                for literal, sign in zip(body_literals, body_literal_signs):
-                    self.add_edge(
-                        abs(literal),
-                        body_key,
-                        edge_weight=float(sign),
-                    )
+        # ----- 2. encode conditions and connect them to consequents -----
 
-            body_sign = 1
-
-        # --------------- process head ---------------
-
-        consequents = defaultdict(list)
-
-        if isinstance(statement, ChoiceRule):
-            # choice rule
-            choice = statement.head
-
-            for element in choice.elements:
-                consequents[element.atom].append(Conjunction(*element.literals))
-        elif isinstance(statement, NPPRule):
-            # NPP rule
-            choice = statement.npp.as_choice()
-
-            for element in choice.elements:
-                consequents[element.atom].append(Conjunction(*element.literals))
+        # normal/disjunctive rule,
+        if isinstance(statement, (NormalRule, DisjunctiveRule)):
+            # no extra conditions
+            conditions = [(atom, Conjunction()) for atom in statement.head]
+        #  constraint
+        elif isinstance(statement, Constraint):
+            # no extra conditions
+            conditions = [(self.false_const, Conjunction())]
+        # choice/NPP rule
         else:
-            # normal/disjunctive rules
-            for atom in statement.head:
-                consequents[atom].append(Conjunction())
+            choice = (
+                statement.head
+                if isinstance(statement, ChoiceRule)
+                else statement.npp.as_choice()
+            )
+            conditions = [(elem.atom, elem.literals) for elem in choice.elements]
 
-            # normal/disjunctive rules
-            if not consequents:
-                consequents[self.false_const].append(Conjunction())
+        # encode conditions
+        conditional_signatures, conditions_dict = self.encode_conditions(
+            conditions,
+            external_condition=body_signature,
+            certain_atoms=certain_atoms,
+            return_conditions_dict=True,
+        )
 
         # dictionary to store the edges corresponding to a choice/disjunction
         # NOTE: used later if statement actually non-deterministic
         choice_edges = list()
-        # TODO
-        cond_map = dict()
 
-        # iterate over all consequent literals
-        for i, (cond_literal, conditions) in enumerate(consequents.items()):
-            # if 'cond_literal' is not a query sink (i.e., Constraint expression)
-            if not isinstance(cond_literal, (Constraint, ComplexQuery)):
-                # encode or update literal node
-                # NOTE: is always positive due to language specifications
-                self.encode_literal(cond_literal, certain_atoms)
+        # connect conditions to consequent literals
+        for consequent_literal, condition_signature in conditional_signatures:
 
-            # ----- process conditions -----
+            # encode consequent literal (if not already)
+            # the condition is satisfyable to begin with
+            if consequent_literal is not self.false_const:
+                self.encode_literal(consequent_literal, certain_atoms)
 
-            literal_conditions = []
-
-            # pre-process conditions
-            # remove builtin-literals and check their satisfiability
-            for cond in conditions:
-                literals = []
-
-                for literal in cond:
-                    if isinstance(literal, BuiltinLiteral):
-                        if not literal.eval():
-                            # condition can never be satisfied (remove)
-                            break
-
-                    literals.append(literal)
-                else:
-                    # condition can be satisfied (keep)
-                    literal_conditions.append(Conjunction(*literals))
-
-            # get minimal conditions
-            # (supersets irrelevant if a subset already satisfies condition)
-            minimal_cond_candidates = get_minimal_collections(*literal_conditions)
-
-            # list of tuples containing the keys to different conditions and their sign
-            cond_keys = []
-            # list of aggregate elements for a choice aggregate
-            # NOTE: used later if statement is a choice rule
-            count_elements = []
-
-            # process final conditions
-            for cond in minimal_cond_candidates:
-                # encode literals (if not already)
-                # NOTE: do NOT need to check for existence of literals from here on out
-                for literal in cond:
-                    self.encode_literal(literal, certain_atoms)
-
-                # save aggregate element for choice rule/NPP
-                count_elements.append(
-                    AggrElement(
-                        TermTuple(Number(i)),
-                        LiteralCollection(cond_literal, *cond),
-                    )
+            choice_edges.append(
+                (
+                    consequent_literal,
+                    *self.add_edge(
+                        abs(condition_signature),
+                        consequent_literal,
+                        # NOTE: -1 is only relevant if the condition (extra + body) consists of a single
+                        # literal, in which case we use the literal directly and the sign becomes relevant
+                        edge_weight=1.0 if not condition_signature.naf else -1.0,
+                    ),
                 )
-
-                # empty condition (unconditional)
-                if len(cond) == 0:
-                    continue
-                # single condition literal (use directly)
-                elif len(cond) == 1:
-                    # sign depends on literal since we its node directly
-                    cond_keys.append((abs(cond[0]), -1 if cond[0].naf else 1))
-                # multiple condition literals (combine in conjunction)
-                else:
-                    if cond not in self.node_id_dict:
-                        # create new conj. node
-                        self.add_node(
-                            cond,
-                            "conj",
-                            f"{self.__unicode_symbols['conj']}_{{{len(self.node_dict['conj']['x'])-1}}}",
-                        )
-
-                        # add edges from literals to conj.
-                        for literal in cond:
-                            self.add_edge(
-                                abs(literal), cond, edge_weight=-1 if literal.naf else 1
-                            )
-
-                    # sign is always positive
-                    cond_keys.append((cond, 1))
-
-            # no condition (unconditional)
-            if len(cond_keys) == 0:
-                # NOTE: even if body is just 'True', we need the edge here
-                choice_edges.append(
-                    (
-                        cond_literal,
-                        *self.add_edge(body_key, cond_literal, edge_weight=body_sign),
-                    )
-                )
-
-                cond_map[cond_literal] = None
-
-            # single condition (use directly)
-            elif len(cond_keys) == 1:
-                # NOTE: condition already encoded as a conjunction (no need to check)
-                cond_key, sign = cond_keys[0]
-                conj_key = (
-                    Conjunction(*body_key, cond_key)
-                    if isinstance(body_key, LiteralCollection)
-                    else Conjunction(body_key, cond_key)
-                )
-
-                if conj_key not in self.node_id_dict:
-                    self.add_node(
-                        conj_key,
-                        "conj",
-                        f"{self.__unicode_symbols['conj']}_{{{len(self.node_dict['conj']['x'])-1}}}",
-                    )
-
-                    if body_key != self.true_const:
-                        self.add_edge(
-                            body_key,
-                            conj_key,
-                            edge_weight=body_sign,
-                        )
-
-                    self.add_edge(cond_key, conj_key, edge_weight=float(sign))
-
-                choice_edges.append(
-                    (
-                        cond_literal,
-                        *self.add_edge(
-                            conj_key,
-                            cond_literal,
-                        ),
-                    )
-                )
-
-                cond_map[cond_literal] = conj_key
-
-            # multiple conditions (combine in disjunction)
-            else:
-                disj_key = Disjunction(cond for cond, _ in cond_keys)
-                conj_key = (
-                    Conjunction(*body_key, disj_key)
-                    if isinstance(body_key, LiteralCollection)
-                    else Conjunction(body_key, disj_key)
-                )
-
-                if conj_key not in self.node_id_dict:
-                    self.add_node(
-                        conj_key,
-                        "conj",
-                        f"{self.__unicode_symbols['conj']}_{{{len(self.node_dict['conj']['x'])-1}}}",
-                    )
-
-                    if disj_key not in self.node_id_dict:
-                        self.add_node(
-                            disj_key,
-                            "disj",
-                            f"{self.__unicode_symbols['disj']}_{{{len(self.node_dict['disj']['x'])-1}}}",
-                        )
-
-                        for cond, sign in cond_keys:
-                            self.add_edge(
-                                cond,
-                                disj_key,
-                                edge_weight=sign,
-                            )
-
-                    self.add_edge(
-                        disj_key,
-                        conj_key,
-                    )
-
-                    if body_key != self.true_const:
-                        self.add_edge(
-                            body_key,
-                            conj_key,
-                            edge_weight=body_sign,
-                        )
-
-                choice_edges.append(
-                    (
-                        cond_literal,
-                        *self.add_edge(
-                            conj_key,
-                            cond_literal,
-                        ),
-                    )
-                )
-
-                cond_map[cond_literal] = conj_key
-
-        if isinstance(statement, (NormalRule, Constraint)):
-            # done
-            return
-
-        if isinstance(statement, DisjunctiveRule):
-            head_literals = statement.head
-
-            # constraint that is active ONLY if the rules body is satisfied
-            # AND NONE of the head literals is satisfied
-            constr_key = Conjunction(
-                *[Naf(deepcopy(atom), True) for atom in head_literals], *body_literals
             )
 
-            if constr_key not in self.node_id_dict:
-                self.add_node(
-                    constr_key,
-                    "conj",
-                    rf"{self.__unicode_symbols['conj']}_{{{len(self.node_dict['conj']['x'])-1}}}",
-                )
-
-            self.add_edge(body_key, constr_key, edge_weight=body_sign)
-
-            for literal in head_literals:
-                self.add_edge(
-                    literal,
-                    constr_key,
-                    edge_weight=-1.0,
-                )
-
-            self.add_edge(
-                constr_key,
-                self.false_const,
-            )
-
-            if statement not in self.choices:
+        # track edges representing choices
+        # TODO: clean up (messy) !!!
+        # TODO: what for disjunctive rules?
+        match statement:
+            case DisjunctiveRule() | ChoiceRule():
                 # TODO: necessary ???
                 self.choices.add(statement)
                 # TODO: best way to store choices?
                 self.choice_edges[statement] = choice_edges
-
-        elif isinstance(statement, (ChoiceRule, NPPRule)):
-            choice_aggr = AggrLiteral(
-                AggrCount(),
-                tuple(count_elements),
-                choice.guards,
-            )
-
-            # TODO: guard encoding
-
-            # encode choice aggregate
-            if choice_aggr not in self.node_id_dict:
-                self.add_node(
-                    choice_aggr,
-                    "count",
-                    f"\#count_{{{len(self.node_dict['count']['x'])}}}",
-                    guards=tuple(self.encode_guards(choice_aggr.guards)),
-                )
-
-                for literal, cond_key in cond_map.items():
-                    if cond_key is None:
-                        self.add_edge(
-                            literal,
-                            choice_aggr,
-                        )
-                    else:
-                        conj_key = Conjunction(literal, cond_key)
-
-                        if conj_key not in self.node_id_dict:
-                            self.add_node(
-                                conj_key,
-                                "conj",
-                                f"{self.__unicode_symbols['conj']}_{{{len(self.node_dict['conj']['x'])-1}}}",
-                            )
-
-                            self.add_edge(
-                                cond_key,
-                                conj_key,
-                            )
-                            self.add_edge(
-                                literal,
-                                conj_key,
-                            )
-
-                        self.add_edge(
-                            conj_key,
-                            choice_aggr,
-                        )
-
-            # add choice constraint
-            constr_key = Conjunction(*body_literals, Naf(choice_aggr))
-
-            if constr_key not in self.node_id_dict:
-                self.add_node(
-                    constr_key,
-                    "conj",
-                    f"{self.__unicode_symbols['conj']}_{{{len(self.node_dict['conj']['x'])-1}}}",
-                )
-
-                self.add_edge(
-                    body_key,
-                    constr_key,
-                    edge_weight=body_sign,
-                )
-                self.add_edge(
-                    choice_aggr,
-                    constr_key,
-                    edge_weight=-1,
-                )
-
-            self.add_edge(constr_key, self.false_const)
-
-            if isinstance(statement, ChoiceRule) and statement not in self.choices:
-                # TODO: necessary ???
-                self.choices.add(statement)
-                # TODO: best way to store choices?
-                self.choice_edges[statement] = choice_edges
-
-            if isinstance(statement, NPPRule) and statement not in self.choices:
+            case NPPRule():
                 # TODO: necessary ???
                 self.npps.add(statement)
                 # TODO: best way to store choices?
                 self.npp_edges[statement] = choice_edges
+
+        # ----- 3. (optional) encode choice constraint -----
+        #
+        #       ┌────────┐     ┌───────┐ ┌───┐
+        #       │   c1   │ ... │   cK  │ │ B │
+        #       └─┬────┬─┘     └─┬────┬┘ └─┬─┘
+        #         ?    │         ?    │    │
+        #         │    │         │    │    │
+        #       ┌─▽──┐ │       ┌─▽──┐ │    │
+        #       │ a1 │ │   ... │ aK │ │    │
+        #       └─┬──┘ │       └─┬──┘ │    │
+        #       ┌─▽────▽─┐     ┌─▽────▽─┐  │
+        #       │ e1 (∧) │ ... | e2 (∧) │  │
+        #       └───┬────┘     └───┬────┘  │
+        #         ┌─▽──────────────▽─┐     │
+        #         │ g1 © #count ® g2 │     │
+        #         └────────┬─────────┘     │
+        #                  -               +
+        #                  │               │
+        #                 ┌▽───────────────▽┐
+        #                 │   Bconstr (∧)   |
+        #                 └────────┬────────┘
+        #                        ┌─▽─┐
+        #                        │ ⊥ │
+        #                        └───┘
+        #
+        # NOTE: if 'ai' has no extra condition, then 'ei' can be skipped
+        # and 'ai' be used directly as input to the aggregate node
+        # Furthermore, if 'B' is Truth, then the conjunction 'Bconstr' can
+        # be skipped and the aggregate node directly connected to Falsity
+
+        # TODO: encode constraints for disjunctive/NPP rule?
+        # -> currently implicitely handled if choice edges are set correctly
+        if isinstance(statement, ChoiceRule):
+            count_member_signatures = []
+            aggr_elements = []
+
+            for consequent_literal, condition_signature in conditional_signatures:
+                # NOTE: if the condition is simply the body or truth, we can skip
+                # encoding conjunction (ei) and just use consequent literal directly
+                if condition_signature in (self.true_const, body_signature):
+                    count_member_signatures.append(consequent_literal)
+                else:
+                    # create conjunction of condition and consequent (ei)
+                    self.encode_conjunction(consequent_literal, condition_signature)
+                    count_member_signatures.append(
+                        Conjunction(consequent_literal, condition_signature)
+                    )
+
+                # create aggregate elements corresponding to the conditions
+                for condition in conditions_dict[consequent_literal]:
+                    aggr_elements.append(
+                        AggrElement(
+                            # NOTE: consequent literal is also a valid term
+                            TermTuple(consequent_literal),
+                            (
+                                LiteralCollection(*condition, *body_literals)
+                                if body_literals[0] is not [self.true_const]
+                                else LiteralCollection(*condition)
+                            ),
+                        )
+                    )
+
+            # signature of aggregate literal
+            aggr_signature = AggrLiteral(
+                AggrCount(), tuple(aggr_elements), guards=statement.choice.guards
+            )
+
+            # create new aggregate node
+            self.add_node(
+                aggr_signature,
+                "count",
+                label=f"#count_{{{len(self.node_dict['count']['x'])-1}}}",
+                guards=tuple(self.encode_guards(statement.choice.guards)),
+            )
+            # NOTE: we set NaF to true here, so that it is not part of
+            # the signature when adding the node above
+            # TODO: cleaner way?
+            aggr_signature.naf = True
+
+            # connect elements to aggregate nodes
+            for member_signature in count_member_signatures:
+                self.add_edge(member_signature, aggr_signature)
+
+            if body_signature is not self.true_const:
+                # create conjunction (Bconstr) of aggregate and statement body
+                self.encode_conjunction(
+                    aggr_signature,
+                    body_signature,
+                    # signs=[-1, 1],
+                )
+                constr_body_signature = Conjunction(aggr_signature, body_signature)
+            else:
+                constr_body_signature = aggr_signature
+
+            # connect to sink node (falsity)
+            self.add_edge(
+                constr_body_signature,
+                self.false_const,
+                edge_weight=-1.0 if constr_body_signature.naf else 1.0,
+            )
+
+    def __encode_junction(
+        self,
+        junction_type: str,
+        keys: Iterable,
+        signs: Optional[int | Iterable[int]] = None,
+    ) -> None:
+        if junction_type not in ("conj", "disj"):
+            raise ValueError(
+                f"'junction_type' must be one of 'conj', 'disj', but was {junction_type}."
+            )
+
+        abs_keys = []
+
+        # get non-default-negated keys
+        for k in keys:
+            abs_k = abs(k)
+
+            # ensure that expression is already encoded in the graph
+            if abs_k not in self.node_id_dict:
+                raise ValueError(
+                    f"Encoding conjunction requires all keys to be encoded, but '{str(k)}' could not be found."
+                )
+
+            abs_keys.append(abs_k)
+
+        num_keys = len(abs_keys)
+
+        # automatically infer signs
+        if signs is None:
+            signs = [-1 if k.naf else 1 for k in keys]
+            num_signs = num_keys
+        # broadcast sign
+        elif isinstance(signs, int):
+            signs = [signs] * num_keys
+            num_signs = num_keys
+        # check number of specified signs
+        else:
+            try:
+                num_signs = len(signs)  # type: ignore
+            except TypeError:
+                num_signs = sum(1 for _ in signs)
+
+        # make sure that the number of keys and signs matches
+        if num_keys != num_signs:
+            raise ValueError("Specified number of signs does not match number of keys.")
+
+        # singleton or empty junction (no need to encode as new node)
+        if num_keys < 2:
+            return
+
+        Junction = Conjunction if junction_type == "conj" else Disjunction
+
+        # create junction node
+        junction_key = Junction(*keys)
+
+        if junction_key not in self.node_id_dict:
+            self.add_node(
+                junction_key,
+                junction_type,
+                f"{self.__unicode_symbols[junction_type]}_{{{len(self.node_dict['conj']['x'])-1}}}",
+            )
+
+            # connect members to conjunction node
+            for k, s in zip(abs_keys, signs, strict=True):
+                self.add_edge(
+                    k,
+                    junction_key,
+                    edge_weight=torch.tensor(s),
+                )
+
+    def encode_conjunction(
+        self, *keys: Expr, signs: Optional[int | Iterable[int]] = None
+    ) -> None:
+        self.__encode_junction("conj", keys, signs)
+
+    def encode_disjunction(
+        self, *keys: Expr, signs: Optional[int | Iterable[int]] = None
+    ) -> None:
+        self.__encode_junction("disj", keys, signs)
 
     def encode_literal(
         self,
@@ -551,15 +484,18 @@ class ReasoningGraph:
             # nothing to do here
             return 0
         elif isinstance(literal, AggrLiteral):
-            aggr = abs(literal)
+            aggr: AggrLiteral = abs(literal)  # type: ignore
 
             # positive or negative aggregate
             self.encode_aggregate(aggr)
-        else:
-            atom = abs(literal)
+        elif isinstance(literal, (TrueConstant, FalseConstant)):
+            return 1
+        elif isinstance(literal, PredLiteral):
+            atom: PredLiteral = abs(literal)  # type: ignore
 
             # initialize probability with 1.0 if atom is certain (i.e., fact)
             p = float(atom in certain_atoms)
+            p = torch.tensor(p)
 
             # register literal if not exits
             try:
@@ -572,7 +508,7 @@ class ReasoningGraph:
             # update value if it does
             except KeyError:
                 # create new atom node
-                # since 'False' already registed, we can safely assume that all new head
+                # since 'False' already registed, we can safely assume that all new
                 # literals are atoms
                 self.add_node(
                     atom,
@@ -587,41 +523,187 @@ class ReasoningGraph:
                 if neg_atom in self.node_id_dict:
                     # add constraint that both cannot be true at the same time
                     # NOTE: since 'atom' is just encoded, we know there is no conj. yet
-
-                    conj_key = Conjunction(atom, neg_atom)
-
-                    self.add_node(
-                        conj_key,
-                        "conj",
-                        f"{self.__unicode_symbols['conj']}_{{{len(self.node_dict['conj']['x'])-1}}}",
-                    )
-
-                    self.add_edge(
-                        atom,
-                        conj_key,
-                    )
-                    self.add_edge(
-                        neg_atom,
-                        conj_key,
-                    )
-                    self.add_edge(conj_key, self.false_const)
+                    self.encode_statement(
+                        Constraint(atom, neg_atom)
+                    )  # should easily take care of things
 
         return -1 if literal.naf else 1
+
+    def encode_conditions(
+        self,
+        conditions: Iterable[Tuple[Expr, LiteralCollection]],
+        external_condition: Optional[Expr] = None,
+        certain_atoms: Optional[Set[PredLiteral]] = None,
+        return_conditions_dict: bool = False,
+    ) -> Union[
+        List[Tuple[Expr, Expr]], Tuple[List[Tuple[Expr, Expr]], Dict[Expr, Expr]]
+    ]:
+
+        # A conditional may have multiple conditions that can satisfy it,
+        # where any condition is sufficient
+        #
+        #       ┌───┐┌───┐┌───┐        ┌───┐┌───┐┌───┐
+        #       │li1││...││lj1│        │liJ││...││ljJ│
+        #       └─┬─┘└─┬─┘└─┬─┘        └─┬─┘└─┬─┘└─┬─┘
+        #         ±    ±    ±            ±    ±    ±
+        #         │    │    │            │    │    │
+        #       ┌─▽────▽────▽──┐       ┌─▽────▽────▽──┐  ┌──────────┐
+        #       │  cond1 (∧)   │  ...  │  cond2 (∧)   │  │ ext_cond │
+        #       └──────┬───────┘       └──────┬───────┘  └────┬─────┘
+        #          ┌───▽──────────────────────▽─────┐         │
+        #          │           anycond (∨)          │         │
+        #          └───────────────┬────────────────┘         │
+        #                        ┌─▽──────────────────────────▽─┐
+        #                        │             c (∧)            │
+        #                        └───────────────┬──────────────┘
+        #                                        ?
+        #                                        │
+        #                                 ┌──────▽──────┐
+        #                                 │ conditional │
+        #                                 └─────────────┘
+        #
+        # NOTE: if 'conditional' only has one possible condition, we can
+        # skip the disjunction and directly treat 'cond1' as 'c'.
+        # Additionally, if there are no extra conditions, then we can
+        # skip the conjunction of 'c' and use 'ext_cond' directly!
+        #
+        # Since consequents may have multiple conditions, we first filter for minimality
+        # since if 'ci' is fullfilled, then all 'cj' that are subsets of 'ci' are also fullfilled,
+        # so it is sufficient to regard inclusion-minimal conditions
+
+        if external_condition is None:
+            external_condition = self.true_const
+
+        if certain_atoms is None:
+            certain_atoms = set()
+
+        # ---------- group elements ----------
+
+        # dictionary mapping a term tuple to possible conditions satisfying it
+        # (multiple possible; only one needs to hold)
+        conditions_dict = defaultdict(list)
+
+        for conditional, condition in conditions:
+            # keep track of predicate_literals only (no built-in literals)
+            predicate_literals = []
+
+            for literal in condition:
+                if isinstance(literal, BuiltinLiteral):
+                    if not literal.eval():
+                        # false built-in literal (i.e., condition unsatisfiable)
+                        # no need to encode this element
+                        break
+                else:
+                    # keep track of literal
+                    predicate_literals.append(literal)
+            # run if loop did not break early (i.e., condition is satisfiable)
+            else:
+                # keep track of condition for tuple
+                # NOTE: conjunction may be empty if there are no predicate literals and
+                # no false built-in literals (in which case the element is unconditional)
+                conditions_dict[conditional].append(Conjunction(*predicate_literals))
+
+        # ---------- process tuples and conditions ----------
+
+        # get minimal conditions
+        # (supersets irrelevant if a subset already satisfies condition)
+        conditions_dict = {
+            # NOTE: we check for empty condition first to avoid having to unnecessarily filter
+            consequent_literal: (
+                (Conjunction(),)
+                if Conjunction() in condition_candidates
+                else get_minimal_collections(*condition_candidates)
+            )
+            for consequent_literal, condition_candidates in conditions_dict.items()
+        }
+
+        conditional_signatures = []
+
+        # process consequents and conditions
+        for consequent_literal, minimal_conditions in conditions_dict.items():
+            if len(minimal_conditions) == 1:
+                condition = minimal_conditions[0]
+
+                # encode all literals in conditions (if not already)
+                for literal in condition:
+                    self.encode_literal(literal, certain_atoms)  # type: ignore
+
+                # directly join 'ext_cond' here
+                # NOTE: can be skipped if 'ext_cond' is 'Truth' and condition is non-empty,
+                # in that case adding 'ext_cond' is unnecessary;
+                # however for empty conditions it is needed
+                if not (external_condition is self.true_const and len(condition) > 0):
+                    condition = [*condition, external_condition]
+
+                # encode conjunction representing this condition ('condi')
+                self.encode_conjunction(*condition)
+                full_condition_signature = (
+                    Conjunction(*condition) if len(condition) > 1 else condition[0]
+                )
+            elif len(minimal_conditions) > 1:
+                condition_signatures = []
+
+                # encode consequent conditions
+                for condition in minimal_conditions:
+                    # encode all literals in conditions (if not already)
+                    for literal in condition:
+                        self.encode_literal(literal, certain_atoms)  # type: ignore
+
+                    # encode conjunction representing this condition ('condi')
+                    self.encode_conjunction(*condition)
+                    conj_signature = (
+                        Conjunction(*condition) if len(condition) > 1 else condition[0]
+                    )
+                    condition_signatures.append(conj_signature)
+
+                # combine conditions using disjunction ('anycond')
+                self.encode_disjunction(*condition_signatures)
+                full_condition_signature = Disjunction(*condition_signatures)
+
+                # combine together with external condition in conjunction (if it is non-empty)
+                if external_condition is not self.true_const:
+                    self.encode_conjunction(
+                        full_condition_signature, external_condition
+                    )
+                    full_condition_signature = Conjunction(
+                        full_condition_signature, external_condition
+                    )
+
+            conditional_signatures.append(
+                (consequent_literal, full_condition_signature)
+            )
+
+        return (
+            conditional_signatures
+            if not return_conditions_dict
+            else (conditional_signatures, conditions_dict)
+        )
 
     def encode_aggregate(
         self,
         aggr: AggrLiteral,
         certain_atoms: Optional[Set[PredLiteral]] = None,
-    ) -> int:
+    ) -> None:
         """Encodes an aggregate in the graph.
 
         Args:
-            aggr: `AggrLiteral` instance.
+            aggr: `AggrLiteral` instance. Is expected to be non-default-negated.
 
         Raises:
             TODO
         """
-        # TODO: optimize & update to use new 'encode_literal' function!
+
+        # Encode an aggregate literal of form:
+        #   g1 © #aggr{t1:li1,...,lj1 ; ... ; tK:liK,...,ljK} ® g2
+        #
+        #        ┌────┐     ┌────┐
+        #        │ e1 │ ... │ eK │
+        #        └─┬──┘     └─┬──┘
+        #        w(t1)      w(tK)
+        #          │          │
+        #       ┌──▽──────────▽───┐
+        #       │ g1 © #aggr ® g2 │
+        #       └─────────────────┘
 
         if certain_atoms is None:
             certain_atoms = set()
@@ -637,123 +719,34 @@ class ReasoningGraph:
                 guards=tuple(self.encode_guards(aggr.guards)),
             )
 
-        # ---------- sort elements ----------
-        # dictionary mapping a tuple to possible conditions satisfying it
-        # (multiple possible; only one needs to hold)
-        cond_dict = defaultdict(lambda: defaultdict(lambda: None))
+        condition_signatures = self.encode_conditions(
+            [(elem.terms, elem.literals) for elem in aggr.elements],
+            certain_atoms=certain_atoms,
+        )
 
-        for elem in aggr.elements:
-            predicate_literals = []
-            for literal in elem.literals:
-                if isinstance(literal, BuiltinLiteral):
-                    if not literal.eval():
-                        # false built-in literal (i.e., body never satisfied)
-                        break
-                else:
-                    # keep classical literals
-                    predicate_literals.append(literal)
-            # run if loop did not break early
-            else:
-                # keep track of condition for tuple
-                literals = Conjunction(*predicate_literals)
-                cond_dict[elem.terms][literals]
+        # multiple distinct term tuples may have the same condition
+        # we can therefore aggregate these together into a single edge
 
-                # register atoms in aggregate element (if not already)
-                for literal in literals:
-                    self.encode_literal(abs(literal), certain_atoms)
+        # NOTE: some conditionals may have the same condition (signature),
+        # so to not have redundant extra edges (which would also break 'draw'),
+        # we keep track of term tuples for each condition signature and
+        # create aggregated edges
+        tuple_cond_dict = defaultdict(list)
 
-        # unconditional tuples (i.e., always satisfied)
-        uncond_tuples = []
+        for tup, condition_signature in condition_signatures:
+            tuple_cond_dict[condition_signature].append(tup)
 
-        # ---------- process tuples and conditions ----------
-        for (
-            tup,
-            cond_candidates,
-        ) in cond_dict.items():
-            # condition always satisfied
-            # (check here to avoid construction of minimal collections)
-            if Conjunction() in cond_candidates:
-                uncond_tuples.append(tup)
-                continue
-
-            # get minimal conditions
-            # (supersets irrelevant if a subset already satisfies condition)
-            minimal_cond_candidates = get_minimal_collections(*cond_candidates)
-
-            # keep track of condition conjunctions
-            tuple_signature = Disjunction(
-                Conjunction(*condition) for condition in minimal_cond_candidates
-            )
-
-            if tuple_signature not in self.node_id_dict:
-                # create auxiliary atom representing satisfied tuple
-                self.add_node(
-                    tuple_signature,
-                    "disj",
-                    label=f"{self.__unicode_symbols['disj']}_{{{len(self.node_dict['disj']['x'])-1}}}",
-                )
-
-            # connect auxiliary node to aggregate node
-            # TODO: better way to compute tuple weight?
+        for tuple_condition_signature, term_tuples in tuple_cond_dict.items():
             self.add_edge(
-                tuple_signature, aggr, edge_weight=float(aggr.func.eval({tup}).eval())
-            )
-
-            # process tuple conditions
-            for condition in minimal_cond_candidates:
-                if len(condition) == 1:
-                    literal = condition[0]
-                    pos_literal = abs(literal)
-
-                    if pos_literal not in self.node_id_dict:
-                        self.add_node(
-                            pos_literal,
-                            "atom",
-                            str(pos_literal),
-                        )
-
-                    self.add_edge(
-                        pos_literal,
-                        tuple_signature,
-                        edge_weight=1.0 if not literal.naf else -1.0,
-                    )
-                else:
-                    # NOTE: already handled non-conditional tuples earlier
-                    conj_signature = Conjunction(*condition)
-
-                    # check if equivalent conjunction exists
-                    if conj_signature not in self.node_id_dict:
-                        # create new conjunction node
-                        self.add_node(
-                            conj_signature,
-                            "conj",
-                            f"{self.__unicode_symbols['conj']}_{{{len(self.node_dict['conj']['x'])-1}}}",
-                        )
-
-                        # connect literals to conjunction node
-                        for literal in condition:
-                            self.add_edge(
-                                abs(literal),
-                                conj_signature,
-                                edge_weight=1.0 if not literal.naf else -1.0,
-                            )
-
-                    self.add_edge(
-                        conj_signature,
-                        tuple_signature,
-                    )
-
-        # edge from 'True' to aggregate auxiliary atom
-        # (weight based on aggregate of all certain tuples)
-        if uncond_tuples:
-            self.add_edge(
-                self.true_const,
+                tuple_condition_signature,
                 aggr,
-                edge_weight=float(aggr.func.eval(set(uncond_tuples)).eval()),
+                edge_weight=float(aggr.func.eval(set(term_tuples)).eval()),
             )
 
     def encode_query(
-        self, query: Union[Constraint, ComplexQuery], certain_atoms: Optional[Set[PredLiteral]] = None
+        self,
+        query: Union[Constraint, Iterable[Constraint]],
+        certain_atoms: Optional[Set[PredLiteral]] = None,
     ) -> int:
         """Adds a query to the reasoning graph.
 
@@ -765,6 +758,9 @@ class ReasoningGraph:
         Raises:
             TODO
         """
+        if not isinstance(query, Constraint):
+            query = MultiConstraint(*query)
+
         try:
             _, sink_id = self.node_id_dict[query]
             self.query_sinks.append(sink_id)
@@ -853,7 +849,7 @@ class ReasoningGraph:
         self,
         src_expr: Expr,
         dst_expr: Expr,
-        **attrs: Dict[str, Any],
+        **attrs: Any,
     ) -> Tuple[Tuple[str, str, str], int]:
         """TODO"""
         try:
@@ -970,10 +966,8 @@ class ReasoningGraph:
             if num_nodes_dict[node_type]:
                 # NOTE: we repeat the tensor to represent different copies of the same graph
                 data[node_type].x = (
-                    torch.tensor(
-                        self.node_dict[node_type]["x"],
-                        device=device
-                    ).type(dtype=torch.int8 if hard else torch.get_default_dtype())
+                    torch.tensor(self.node_dict[node_type]["x"], device=device)
+                    .type(dtype=torch.int8 if hard else torch.get_default_dtype())
                     .unsqueeze(1)
                     .repeat(1, copies)
                 )
@@ -1018,9 +1012,14 @@ class ReasoningGraph:
                         torch.tensor(
                             self.edge_dict[edge_type]["edge_weight"],
                             device=device,
-                        ).type(dtype=torch.int8
-                            if hard and dst_type not in self.node_types[3:]
-                            else torch.get_default_dtype(),)
+                        )
+                        .type(
+                            dtype=(
+                                torch.int8
+                                if hard and dst_type not in self.node_types[3:]
+                                else torch.get_default_dtype()
+                            ),
+                        )
                         .unsqueeze(1)
                         .repeat(1, copies)
                     )
@@ -1035,9 +1034,11 @@ class ReasoningGraph:
                     data[edge_type].edge_weight = torch.empty(
                         0,
                         copies,
-                        dtype=torch.int8
-                        if data.hard and dst_type not in node_types[3:]
-                        else torch.get_default_dtype(),
+                        dtype=(
+                            torch.int8
+                            if data.hard and dst_type not in node_types[3:]
+                            else torch.get_default_dtype()
+                        ),
                         device=device,
                     )
 
@@ -1074,9 +1075,11 @@ class ReasoningGraph:
                     data[edge_type].edge_weight = torch.empty(
                         0,
                         copies,
-                        dtype=torch.int8
-                        if data.hard and edge_type[2] not in node_types[3:]
-                        else torch.get_default_dtype(),
+                        dtype=(
+                            torch.int8
+                            if data.hard and edge_type[2] not in node_types[3:]
+                            else torch.get_default_dtype()
+                        ),
                         device=device,
                     )
 
@@ -1116,33 +1119,62 @@ class ReasoningGraph:
         # initialize directed graph
         graph = pgv.AGraph(directed=True, rankdir=direction)
 
-        # add nodes
+        # ----- add nodes -----
+
+        # global sink node
         graph.add_node(
             self.node_dict["disj"]["label"][0],
             style="filled",
             fillcolor="lightgoldenrod",
             shape="circle",
-            label=self.__unicode_symbols["true"],
+            label=self.__unicode_symbols["false"],
         )
-        graph.add_nodes_from(
-            self.node_dict["disj"]["label"][1:],
-            style="filled",
-            fillcolor="gray40",
-            shape="circle",
-            label=self.__unicode_symbols["disj"],
-            fontcolor="white",
-        )
+
+        # map disj. node ID to its query sink ID
+        query_sink_dict = {
+            node_id: query_sink_id
+            for query_sink_id, node_id in enumerate(self.query_sinks)
+        }
+
+        for disj_id, disj in enumerate(self.node_dict["disj"]["label"][1:], start=1):
+            # query sink
+            if disj_id in query_sink_dict:
+                fillcolor = "lightgoldenrod"
+                shape = "oval"
+                label = rf"{self.__unicode_symbols['false']}{query_sink_dict[disj_id]}"
+                fontcolor = "black"
+            # "regular" disjunction
+            else:
+                fillcolor = "gray40"
+                shape = "circle"
+                label = self.__unicode_symbols["disj"]
+                fontcolor = "white"
+
+            graph.add_node(
+                disj,
+                style="filled",
+                fillcolor=fillcolor,
+                shape=shape,
+                label=label,
+                fontcolor=fontcolor,
+            )
+
+        # atoms
         graph.add_nodes_from(
             self.node_dict["atom"]["label"],
             style="filled",
             fillcolor="darkslategray3",
             shape="oval",
         )
+
+        # source node
         graph.add_node(
             self.node_dict["conj"]["label"][0],
             shape="circle",
-            label=self.__unicode_symbols["false"],
+            label=self.__unicode_symbols["true"],
         )
+
+        # conjunctions
         graph.add_nodes_from(
             self.node_dict["conj"]["label"][1:],
             shape="circle",
@@ -1159,6 +1191,7 @@ class ReasoningGraph:
             5: self.__unicode_symbols["geq"],
         }
 
+        # aggregates
         for node_type in ("count", "sum", "min", "max"):
             for node_key, guards in zip(
                 self.node_dict[node_type]["label"], self.node_dict[node_type]["guards"]
@@ -1192,7 +1225,7 @@ class ReasoningGraph:
 
                 choice_edges.append((src_key, dst_key))
 
-        # add edges
+        # ----- add edges -----
         for src_type, dst_type in itertools.product(
             ("atom", "disj", "conj", "count", "sum", "min", "max"),
             ("atom", "disj", "conj", "count", "sum", "min", "max"),
@@ -1221,7 +1254,7 @@ class ReasoningGraph:
                     dst_key,
                     color=color,
                     style="dashed" if (src_key, dst_key) in choice_edges else "",
-                    label=str(w) if dst_type in ("sum", "min", "max") else "",
+                    label=str(w) if dst_type in ("count", "sum", "min", "max") else "",
                 )
 
         return graph

@@ -63,10 +63,12 @@ def condense_edges_pyg(
         [
             torch.cat(
                 [
-                    torch.tensor([[offset_dict[src_type]], [0]], device=device)
-                    + data[(src_type, "to", dst_type)].edge_index
-                    if (src_type, "to", dst_type) in data.edge_types
-                    else torch.empty(2, 0, device=device)
+                    (
+                        torch.tensor([[offset_dict[src_type]], [0]], device=device)
+                        + data[(src_type, "to", dst_type)].edge_index
+                        if (src_type, "to", dst_type) in data.edge_types
+                        else torch.empty(2, 0, device=device)
+                    )
                     for src_type in __node_types
                 ],
                 dim=1,
@@ -79,10 +81,12 @@ def condense_edges_pyg(
     # -> conj.
     data_condensed[("_", "to", "conj")].edge_index = torch.cat(
         [
-            torch.tensor([[offset_dict[src_type]], [0]], device=device)
-            + data[(src_type, "to", "conj")].edge_index
-            if (src_type, "to", "conj") in data.edge_types
-            else torch.empty(2, 0, device=device)
+            (
+                torch.tensor([[offset_dict[src_type]], [0]], device=device)
+                + data[(src_type, "to", "conj")].edge_index
+                if (src_type, "to", "conj") in data.edge_types
+                else torch.empty(2, 0, device=device)
+            )
             for src_type in __node_types
         ],
         dim=1,
@@ -92,10 +96,12 @@ def condense_edges_pyg(
         [
             torch.cat(
                 [
-                    torch.tensor([[offset_dict[src_type]], [0]], device=device)
-                    + data[(src_type, "to", dst_type)].edge_index
-                    if (src_type, "to", dst_type) in data.edge_types
-                    else torch.empty(2, 0, device=device)
+                    (
+                        torch.tensor([[offset_dict[src_type]], [0]], device=device)
+                        + data[(src_type, "to", dst_type)].edge_index
+                        if (src_type, "to", dst_type) in data.edge_types
+                        else torch.empty(2, 0, device=device)
+                    )
                     for src_type in ("atom", "disj", "conj")
                 ],
                 dim=1,
@@ -111,10 +117,12 @@ def condense_edges_pyg(
     # -> min
     data_condensed[("atom/disj/conj", "to", "min")].edge_index = torch.cat(
         [
-            torch.tensor([[offset_dict[src_type]], [0]], device=device)
-            + data[(src_type, "to", "min")].edge_index
-            if (src_type, "to", "min") in data.edge_types
-            else torch.empty(2, 0, device=device)
+            (
+                torch.tensor([[offset_dict[src_type]], [0]], device=device)
+                + data[(src_type, "to", "min")].edge_index
+                if (src_type, "to", "min") in data.edge_types
+                else torch.empty(2, 0, device=device)
+            )
             for src_type in ("atom", "disj", "conj")
         ],
         dim=1,
@@ -122,10 +130,12 @@ def condense_edges_pyg(
     # -> max
     data_condensed[("atom/disj/conj", "to", "max")].edge_index = torch.cat(
         [
-            torch.tensor([[offset_dict[src_type]], [0]], device=device)
-            + data[(src_type, "to", "max")].edge_index
-            if (src_type, "to", "max") in data.edge_types
-            else torch.empty(2, 0, device=device)
+            (
+                torch.tensor([[offset_dict[src_type]], [0]], device=device)
+                + data[(src_type, "to", "max")].edge_index
+                if (src_type, "to", "max") in data.edge_types
+                else torch.empty(2, 0, device=device)
+            )
             for src_type in ("atom", "disj", "conj")
         ],
         dim=1,
@@ -148,13 +158,15 @@ def condense_edges_pyg(
     if ("_", "to", "atom/disj") in data_condensed.edge_types:
         data_condensed[("_", "to", "atom/disj")].edge_weight = torch.cat(
             [
-                data[(src_type, "to", dst_type)].edge_weight
-                if (src_type, "to", dst_type) in data.edge_types
-                else torch.empty(
-                    0,
-                    data.copies,
-                    dtype=torch.int8 if data.hard else torch.get_default_dtype(),
-                    device=device,
+                (
+                    data[(src_type, "to", dst_type)].edge_weight
+                    if (src_type, "to", dst_type) in data.edge_types
+                    else torch.empty(
+                        0,
+                        data.copies,
+                        dtype=torch.int8 if data.hard else torch.get_default_dtype(),
+                        device=device,
+                    )
                 )
                 for dst_type in ("atom", "disj")
                 for src_type in __node_types
@@ -165,13 +177,15 @@ def condense_edges_pyg(
     if ("_", "to", "conj") in data_condensed.edge_types:
         data_condensed[("_", "to", "conj")].edge_weight = torch.cat(
             [
-                data[(src_type, "to", "conj")].edge_weight
-                if (src_type, "to", "conj") in data.edge_types
-                else torch.empty(
-                    0,
-                    data.copies,
-                    dtype=torch.int8 if data.hard else torch.get_default_dtype(),
-                    device=device,
+                (
+                    data[(src_type, "to", "conj")].edge_weight
+                    if (src_type, "to", "conj") in data.edge_types
+                    else torch.empty(
+                        0,
+                        data.copies,
+                        dtype=torch.int8 if data.hard else torch.get_default_dtype(),
+                        device=device,
+                    )
                 )
                 for src_type in __node_types
             ],
@@ -181,9 +195,11 @@ def condense_edges_pyg(
     if ("atom/disj/conj", "to", "count/sum") in data_condensed.edge_types:
         data_condensed[("atom/disj/conj", "to", "count/sum")].edge_weight = torch.cat(
             [
-                data[(src_type, "to", dst_type)].edge_weight
-                if (src_type, "to", dst_type) in data.edge_types
-                else torch.empty(0, data.copies, device=device)
+                (
+                    data[(src_type, "to", dst_type)].edge_weight
+                    if (src_type, "to", dst_type) in data.edge_types
+                    else torch.empty(0, data.copies, device=device)
+                )
                 for dst_type in ("count", "sum")
                 for src_type in __node_types[:3]
             ],
@@ -193,9 +209,11 @@ def condense_edges_pyg(
     if ("atom/disj/conj", "to", "min") in data_condensed.edge_types:
         data_condensed[("atom/disj/conj", "to", "min")].edge_weight = torch.cat(
             [
-                data[(src_type, "to", "min")].edge_weight
-                if (src_type, "to", "min") in data.edge_types
-                else torch.empty(0, data.copies, device=device)
+                (
+                    data[(src_type, "to", "min")].edge_weight
+                    if (src_type, "to", "min") in data.edge_types
+                    else torch.empty(0, data.copies, device=device)
+                )
                 for src_type in __node_types[:3]
             ],
             dim=0,
@@ -204,9 +222,11 @@ def condense_edges_pyg(
     if ("atom/disj/conj", "to", "max") in data_condensed.edge_types:
         data_condensed[("atom/disj/conj", "to", "max")].edge_weight = torch.cat(
             [
-                data[(src_type, "to", "max")].edge_weight
-                if (src_type, "to", "max") in data.edge_types
-                else torch.empty(0, data.copies, device=device)
+                (
+                    data[(src_type, "to", "max")].edge_weight
+                    if (src_type, "to", "max") in data.edge_types
+                    else torch.empty(0, data.copies, device=device)
+                )
                 for src_type in __node_types[:3]
             ],
             dim=0,

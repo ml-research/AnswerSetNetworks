@@ -73,9 +73,9 @@ class SolvingContext:
                 torch.eq(
                     # element-wise OR with all subsequent interpretations
                     # I_k LOR I_j for j > k
-                    torch.logical_or(atoms[[k], :], atoms[k+1:, :]),
+                    torch.logical_or(atoms[[k], :], atoms[k + 1 :, :]),
                     # -> n_combinations-(k+1) x n_atoms
-                    atoms[[k], :]
+                    atoms[[k], :],
                 ),
                 # -> n_combinations-(k+1) x n_atoms
                 dim=1,
@@ -84,25 +84,27 @@ class SolvingContext:
             # -> 1 x n_combinations-(k+1) x 1
 
             # update I_k to reflect whether it is a superset of another stable model candidate
-            is_SM[:, [k], :] *= ~torch.any(is_supseteq * is_SM[:, k + 1 :, :], dim=1, keepdims=True)
+            is_SM[:, [k], :] *= ~torch.any(
+                is_supseteq * is_SM[:, k + 1 :, :], dim=1, keepdims=True
+            )
 
             # check if I_k is subset of I_j, j > k
             is_subseteq = torch.all(
                 torch.eq(
                     # element-wise OR with all subsequent interpretations
                     # I_k LAND I_j for j > k
-                    torch.logical_and(atoms[[k], :], atoms[k+1:, :]),
+                    torch.logical_and(atoms[[k], :], atoms[k + 1 :, :]),
                     # -> n_combinations-(k+1) x n_atoms
-                    atoms[[k], :]
+                    atoms[[k], :],
                 ),
                 # -> n_combinations-(k+1) x n_atoms
                 dim=1,
                 keepdims=True,
             ).unsqueeze(0)
             # -> 1 x n_combinations-(k+1) x 1
-    
+
             # update I_j to reflect whether it is a subset of another stable model candidate
-            is_SM[:, k+1:, :] *= ~(is_subseteq * is_SM[:, [k], :])
+            is_SM[:, k + 1 :, :] *= ~(is_subseteq * is_SM[:, [k], :])
 
     def update_SMs(self, graph_block: "GraphBlock") -> None:
         atoms = graph_block.atoms
@@ -261,7 +263,7 @@ class SolvingContext:
                             npp_ctx.p,
                             # -> batch_size x n_out
                             -1,
-                            npp_choices.repeat(npp_ctx.p.shape[0], 1)
+                            npp_choices.repeat(npp_ctx.p.shape[0], 1),
                             # -> batch_size x n_combinations
                         ).unsqueeze(-1)
                         # -> batch_size x n_combinations x 1

@@ -227,21 +227,25 @@ class ASN:
         batch = condense_edges_pyg(batch, device=device)
 
         # broadcast ids for certain atoms across each graph
-        certain_atom_ids = torch.tensor(rg.certain_atom_ids, device=device, dtype=torch.long)
+        certain_atom_ids = torch.tensor(
+            rg.certain_atom_ids, device=device, dtype=torch.long
+        )
         query_sinks_batch = query_sinks
 
         graph_block = GraphBlock(
             dict(batch.node_items()),
             dict(batch.edge_items()),
-            torch.cat(
-                [
-                    torch.tensor(choices, device=device)
-                    for choices in npp_choices_dict.values()
-                ],
-                dim=-1,
-            )
-            if npp_choices_dict
-            else torch.empty(n_combinations, 0, device=device),
+            (
+                torch.cat(
+                    [
+                        torch.tensor(choices, device=device)
+                        for choices in npp_choices_dict.values()
+                    ],
+                    dim=-1,
+                )
+                if npp_choices_dict
+                else torch.empty(n_combinations, 0, device=device)
+            ),
             certain_atom_ids=certain_atom_ids,
             sink_ids=query_sinks_batch,
         )
