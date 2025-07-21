@@ -228,7 +228,9 @@ class ASN:
 
         # broadcast ids for certain atoms across each graph
         certain_atom_ids = torch.tensor(
-            rg.certain_atom_ids, device=device, dtype=torch.long
+            [rg.node_id_dict[atom][1] for atom in rg.certain_atoms],
+            device=device,
+            dtype=torch.long,
         )
         query_sinks_batch = query_sinks
 

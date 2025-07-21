@@ -124,19 +124,18 @@ class ReasoningGraph:
 
         # ---------- process program ----------
         for stmt in prog.statements:
-            self.encode_statement(stmt, certain_atoms)
+            self.encode_statement(stmt)
 
-        # map certain atoms to their node ids
-        self.certain_atom_ids = [self.node_id_dict[atom][1] for atom in certain_atoms]
+        # certain atoms are atoms that are considered to be always true
+        # (e.g. inferred by a grounder) and can thus be initialized as true
+        # NOTE: this may speed up convergence during truth propagation
+        # TODO: could be used to simplify graph structure during encoding
+        self.certain_atoms = certain_atoms
 
     def encode_statement(
         self,
         statement: Statement,
-        certain_atoms: Optional[Set[PredLiteral]] = None,
     ) -> None:
-        if certain_atoms is None:
-            certain_atoms = set()
-
         # check if statement is ground
         if not statement.ground:
             raise ValueError(f"Statement {str(statement)} is not ground.")
@@ -178,7 +177,7 @@ class ReasoningGraph:
                     return
             else:
                 # encode literal (if not already) and keep track of it
-                self.encode_literal(literal, certain_atoms)
+                self.encode_literal(literal)
                 body_literals.append(literal)
 
         # in case of facts, treat 'truth' as only body literal
@@ -247,7 +246,6 @@ class ReasoningGraph:
         conditional_signatures, conditions_dict = self.encode_conditions(
             conditions,
             external_condition=body_signature,
-            certain_atoms=certain_atoms,
             return_conditions_dict=True,
         )
 
@@ -261,7 +259,7 @@ class ReasoningGraph:
             # encode consequent literal (if not already)
             # the condition is satisfyable to begin with
             if consequent_literal is not self.false_const:
-                self.encode_literal(consequent_literal, certain_atoms)
+                self.encode_literal(consequent_literal)
 
             choice_edges.append(
                 (
@@ -475,11 +473,7 @@ class ReasoningGraph:
     def encode_literal(
         self,
         literal: Literal,
-        certain_atoms: Optional[Set[PredLiteral]] = None,
     ) -> int:
-        if certain_atoms is None:
-            certain_atoms = set()
-
         if isinstance(literal, BuiltinLiteral):
             # nothing to do here
             return 0
@@ -493,20 +487,8 @@ class ReasoningGraph:
         elif isinstance(literal, PredLiteral):
             atom: PredLiteral = abs(literal)  # type: ignore
 
-            # initialize probability with 1.0 if atom is certain (i.e., fact)
-            p = float(atom in certain_atoms)
-            p = torch.tensor(p)
-
             # register literal if not exits
-            try:
-                # update existing node
-                # use maximum possible value (a fact is not invalidated by a rule)
-                node_type, literal_id = self.node_id_dict[atom]
-                self.node_dict[node_type]["x"][literal_id] = max(
-                    self.node_dict[node_type]["x"][literal_id], p
-                )
-            # update value if it does
-            except KeyError:
+            if atom not in self.node_id_dict:
                 # create new atom node
                 # since 'False' already registed, we can safely assume that all new
                 # literals are atoms
@@ -514,7 +496,6 @@ class ReasoningGraph:
                     atom,
                     "atom",
                     label=str(atom),
-                    x=p,
                 )
 
                 # check if strong negation is also encoded in the graph
@@ -533,7 +514,6 @@ class ReasoningGraph:
         self,
         conditions: Iterable[Tuple[Expr, LiteralCollection]],
         external_condition: Optional[Expr] = None,
-        certain_atoms: Optional[Set[PredLiteral]] = None,
         return_conditions_dict: bool = False,
     ) -> Union[
         List[Tuple[Expr, Expr]], Tuple[List[Tuple[Expr, Expr]], Dict[Expr, Expr]]
@@ -573,9 +553,6 @@ class ReasoningGraph:
 
         if external_condition is None:
             external_condition = self.true_const
-
-        if certain_atoms is None:
-            certain_atoms = set()
 
         # ---------- group elements ----------
 
@@ -626,7 +603,7 @@ class ReasoningGraph:
 
                 # encode all literals in conditions (if not already)
                 for literal in condition:
-                    self.encode_literal(literal, certain_atoms)  # type: ignore
+                    self.encode_literal(literal)  # type: ignore
 
                 # directly join 'ext_cond' here
                 # NOTE: can be skipped if 'ext_cond' is 'Truth' and condition is non-empty,
@@ -647,7 +624,7 @@ class ReasoningGraph:
                 for condition in minimal_conditions:
                     # encode all literals in conditions (if not already)
                     for literal in condition:
-                        self.encode_literal(literal, certain_atoms)  # type: ignore
+                        self.encode_literal(literal)  # type: ignore
 
                     # encode conjunction representing this condition ('condi')
                     self.encode_conjunction(*condition)
@@ -682,7 +659,6 @@ class ReasoningGraph:
     def encode_aggregate(
         self,
         aggr: AggrLiteral,
-        certain_atoms: Optional[Set[PredLiteral]] = None,
     ) -> None:
         """Encodes an aggregate in the graph.
 
@@ -692,7 +668,6 @@ class ReasoningGraph:
         Raises:
             TODO
         """
-
         # Encode an aggregate literal of form:
         #   g1 © #aggr{t1:li1,...,lj1 ; ... ; tK:liK,...,ljK} ® g2
         #
@@ -705,8 +680,12 @@ class ReasoningGraph:
         #       │ g1 © #aggr ® g2 │
         #       └─────────────────┘
 
-        if certain_atoms is None:
-            certain_atoms = set()
+        # TODO: currently only handles integer (& supremum, infimum) aggregate terms/guards
+        # Idea:
+        # - since we are dealing with finite ground programs, there are finite aggr. terms
+        # - rank aggregate terms/guards accoding to term ordering
+        # - replace original terms/guards with their integer rank as term
+        # -> order-preserving transformation using integers
 
         aggr_type = str(aggr.func)[1:]
 
@@ -721,7 +700,6 @@ class ReasoningGraph:
 
         condition_signatures = self.encode_conditions(
             [(elem.terms, elem.literals) for elem in aggr.elements],
-            certain_atoms=certain_atoms,
         )
 
         # multiple distinct term tuples may have the same condition
@@ -746,14 +724,11 @@ class ReasoningGraph:
     def encode_query(
         self,
         query: Union[Constraint, Iterable[Constraint]],
-        certain_atoms: Optional[Set[PredLiteral]] = None,
     ) -> int:
         """Adds a query to the reasoning graph.
 
         Args:
             query: `Constraint` instance.
-            certain_atoms: optional set of atoms (`PredLiteral` instances) whose nodes
-                are initialized to `True`. Can be used to reduce number of iterations.
 
         Raises:
             TODO
@@ -784,12 +759,12 @@ class ReasoningGraph:
         # simple query (single constraint)
         if isinstance(query, Constraint):
             # process query as a regular constraint (new sink is used instead)
-            self.encode_statement(query, certain_atoms)
+            self.encode_statement(query)
         # complex query (multiple constraints)
         else:
             for q in query.constraints:
                 # process query as a regular constraint (new sink is used instead)
-                self.encode_statement(q, certain_atoms)
+                self.encode_statement(q)
 
         # reset sink to global sink
         self.false_const = global_sink
@@ -808,7 +783,7 @@ class ReasoningGraph:
         node_type: str,
         label: str,
         **attrs: Dict[str, Any],
-    ) -> None:
+    ) -> int:
         """TODO"""
 
         # if node_type == "conj" and len(self.node_dict['conj']['x']) == 2:
@@ -992,6 +967,9 @@ class ReasoningGraph:
                         4,
                         device=device,
                     )
+
+        # initialize certain atoms to '1' (i.e. true)
+        data["atom"].x[[self.node_id_dict[atom][1] for atom in self.certain_atoms]] = 1
 
         # ----- edge indices and weights -----
 
