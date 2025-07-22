@@ -29,6 +29,7 @@ from ground_slash.program import (
     PredLiteral,
     Program,
     Statement,
+    Supremum,
     TermTuple,
     TrueConstant,
 )
@@ -680,14 +681,75 @@ class ReasoningGraph:
         #       │ g1 © #aggr ® g2 │
         #       └─────────────────┘
 
-        # TODO: currently only handles integer (& supremum, infimum) aggregate terms/guards
-        # Idea:
-        # - since we are dealing with finite ground programs, there are finite aggr. terms
-        # - rank aggregate terms/guards accoding to term ordering
-        # - replace original terms/guards with their integer rank as term
-        # -> order-preserving transformation using integers
+        # pre-process tuples based on aggregate type
+        match aggr_type := str(aggr.func)[1:]:
+            case "count":
+                element_tuples = [(elem.terms, elem.literals) for elem in aggr.elements]
 
-        aggr_type = str(aggr.func)[1:]
+                # count aggregates are integers, which are lowest in the term ordering
+                # we can therefore simply replace non-integer guards with the supremum (+inf)
+                guards = [
+                    (
+                        g
+                        if g is None or isinstance(g.bound, Number)
+                        else Guard(g.op, Supremum(), g.right)
+                    )
+                    for g in aggr.guards
+                ]
+            case "sum":
+                # only regard elements whose first term is a non-zero integer
+                element_tuples = [
+                    (elem.terms, elem.literals)
+                    for elem in aggr.elements
+                    if isinstance(elem.terms[0], Number) and elem.terms[0].val != 0
+                ]
+                print([str(e[0]) for e in element_tuples])
+
+                # count aggregates are integers, which are lowest in the term ordering
+                # we can therefore simply replace non-integer guards with the supremum (+inf)
+                guards = [
+                    (
+                        g
+                        if g is None or isinstance(g.bound, Number)
+                        else Guard(g.op, Supremum(), g.right)
+                    )
+                    for g in aggr.guards
+                ]
+            case "min" | "max":
+                element_tuples = [(elem.terms, elem.literals) for elem in aggr.elements]
+
+                # 'min'/'max' aggregates may be any valid term, we therefore need
+                # to map them into numerical values in an order-preserving way
+                # NOTE: input aggregates are finite, so we can rank all terms/guards
+                # and replace the original terms/guards with their integer rank
+                term_rank = {
+                    term: i
+                    for i, term in enumerate(
+                        sorted(
+                            list(
+                                {elem.terms[0] for elem in aggr.elements}
+                                | {g.bound for g in aggr.guards if g is not None}
+                            )
+                        )
+                    )
+                }
+                element_tuples = [
+                    (
+                        TermTuple(Number(term_rank[elem.terms[0]]), *elem.terms[1:]),
+                        elem.literals,
+                    )
+                    for elem in aggr.elements
+                ]
+                guards = [
+                    g if g is None else Guard(g.op, Number(term_rank[g.bound]), g.right)
+                    for g in aggr.guards
+                ]
+            case _:
+                raise ValueError("Unknown aggregate type.")
+
+        condition_signatures = self.encode_conditions(
+            element_tuples,
+        )
 
         if aggr not in self.node_id_dict:
             # create new aggregate node
@@ -695,15 +757,8 @@ class ReasoningGraph:
                 aggr,
                 aggr_type,
                 label=f"{str(aggr.func)}_{{{len(self.node_dict[aggr_type]['x'])-1}}}",
-                guards=tuple(self.encode_guards(aggr.guards)),
+                guards=tuple(self.encode_guards(guards)),
             )
-
-        condition_signatures = self.encode_conditions(
-            [(elem.terms, elem.literals) for elem in aggr.elements],
-        )
-
-        # multiple distinct term tuples may have the same condition
-        # we can therefore aggregate these together into a single edge
 
         # NOTE: some conditionals may have the same condition (signature),
         # so to not have redundant extra edges (which would also break 'draw'),
@@ -887,14 +942,14 @@ class ReasoningGraph:
             else:
                 if isinstance(guard.bound, Number):
                     bound = guard.bound.eval()
+                elif isinstance(guard.bound, Infimum):
+                    bound = -float("inf")
+                elif isinstance(guard.bound, Supremum):
+                    bound = float("inf")
                 else:
-                    # infimum is the only object that precedes numbers in
-                    # the total ordering for terms
-                    # use +-infinity respectively
-                    bound = (
-                        -float("inf")
-                        if isinstance(guard.bound, Infimum)
-                        else float("inf")
+                    print(str(guard.bound), type(guard.bound))
+                    raise ValueError(
+                        "Cannot enocode guard terms that not a number, Infimum, or Supremum."
                     )
 
                 guard_encoding += [
